@@ -1,0 +1,265 @@
+generator client {
+  provider = "prisma-client-js"
+  
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+
+// ─── USERS ────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  githubId      String    @unique
+  username      String    @unique
+  name          String?
+  email         String?   @unique
+  avatarUrl     String?
+  githubToken   String?   // encrypted OAuth token
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Relations
+  memberships   TeamMember[]
+  sessions      Session[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+// ─── TEAMS & REPOSITORIES ─────────────────────────────────────────────────────
+
+model Team {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  members     TeamMember[]
+  repos       Repository[]
+
+  @@map("teams")
+}
+
+model TeamMember {
+  id        String   @id @default(cuid())
+  teamId    String
+  userId    String
+  role      TeamRole @default(MEMBER)
+  joinedAt  DateTime @default(now())
+
+  team      Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([teamId, userId])
+  @@map("team_members")
+}
+
+enum TeamRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model Repository {
+  id            String   @id @default(cuid())
+  teamId        String
+  githubId      Int      @unique
+  name          String
+  fullName      String   @unique  // e.g. "org/repo"
+  description   String?
+  isPrivate     Boolean  @default(false)
+  defaultBranch String   @default("main")
+  language      String?
+  webhookId     Int?     // GitHub webhook ID
+  lastSyncedAt  DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  team          Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  commits       Commit[]
+  pullRequests  PullRequest[]
+  issues        Issue[]
+  metrics       RepoMetrics[]
+
+  @@map("repositories")
+}
+
+// ─── COMMITS ──────────────────────────────────────────────────────────────────
+
+model Commit {
+  id            String     @id @default(cuid())
+  repoId        String
+  sha           String
+  message       String
+  authorName    String
+  authorEmail   String
+  authorGithubUsername String?
+  additions     Int        @default(0)
+  deletions     Int        @default(0)
+  filesChanged  Int        @default(0)
+  branch        String?
+  committedAt   DateTime
+  createdAt     DateTime   @default(now())
+
+  repo          Repository @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  @@unique([repoId, sha])
+  @@index([repoId, committedAt])
+  @@index([authorEmail])
+  @@map("commits")
+}
+
+// ─── PULL REQUESTS ────────────────────────────────────────────────────────────
+
+model PullRequest {
+  id              String     @id @default(cuid())
+  repoId          String
+  githubId        Int
+  number          Int
+  title           String
+  body            String?
+  state           PRState    @default(OPEN)
+  authorUsername  String
+  additions       Int        @default(0)
+  deletions       Int        @default(0)
+  changedFiles    Int        @default(0)
+  reviewCount     Int        @default(0)
+  commentCount    Int        @default(0)
+  // Time tracking (for cycle time metrics)
+  openedAt        DateTime
+  firstReviewAt   DateTime?
+  mergedAt        DateTime?
+  closedAt        DateTime?
+  cycleTimeHours  Float?     // calculated: openedAt → mergedAt
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  repo            Repository  @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  reviews         PRReview[]
+  labels          PRLabel[]
+
+  @@unique([repoId, number])
+  @@index([repoId, state])
+  @@index([repoId, openedAt])
+  @@map("pull_requests")
+}
+
+enum PRState {
+  OPEN
+  MERGED
+  CLOSED
+}
+
+model PRReview {
+  id            String       @id @default(cuid())
+  pullRequestId String
+  reviewerUsername String
+  state         ReviewState
+  submittedAt   DateTime
+  createdAt     DateTime     @default(now())
+
+  pullRequest   PullRequest  @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+
+  @@map("pr_reviews")
+}
+
+enum ReviewState {
+  APPROVED
+  CHANGES_REQUESTED
+  COMMENTED
+  DISMISSED
+}
+
+model PRLabel {
+  id            String      @id @default(cuid())
+  pullRequestId String
+  name          String
+  color         String?
+
+  pullRequest   PullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+
+  @@map("pr_labels")
+}
+
+// ─── ISSUES ───────────────────────────────────────────────────────────────────
+
+model Issue {
+  id            String      @id @default(cuid())
+  repoId        String
+  githubId      Int
+  number        Int
+  title         String
+  state         IssueState  @default(OPEN)
+  authorUsername String
+  openedAt      DateTime
+  closedAt      DateTime?
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  repo          Repository  @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  @@unique([repoId, number])
+  @@index([repoId, state])
+  @@map("issues")
+}
+
+enum IssueState {
+  OPEN
+  CLOSED
+}
+
+// ─── METRICS (pre-computed for fast dashboard queries) ────────────────────────
+
+model RepoMetrics {
+  id                String     @id @default(cuid())
+  repoId            String
+  date              DateTime   // the day these metrics are for
+  // Commit metrics
+  commitCount       Int        @default(0)
+  uniqueAuthors     Int        @default(0)
+  linesAdded        Int        @default(0)
+  linesDeleted      Int        @default(0)
+  // PR metrics
+  prsOpened         Int        @default(0)
+  prsMerged         Int        @default(0)
+  avgCycleTimeHours Float?
+  // Review metrics
+  reviewsGiven      Int        @default(0)
+  avgReviewsPerPR   Float?
+  createdAt         DateTime   @default(now())
+
+  repo              Repository @relation(fields: [repoId], references: [id], onDelete: Cascade)
+
+  @@unique([repoId, date])
+  @@index([repoId, date])
+  @@map("repo_metrics")
+}
+
+// ─── AI / VECTOR PIPELINE ─────────────────────────────────────────────────────
+
+model EmbeddingRecord {
+  id          String   @id @default(cuid())
+  sourceType  String   // "commit" | "pr" | "issue"
+  sourceId    String   // the ID of the commit/PR/issue
+  repoId      String
+  pineconeId  String   @unique // the vector ID in Pinecone
+  createdAt   DateTime @default(now())
+
+  @@index([repoId, sourceType])
+  @@map("embedding_records")
+}
